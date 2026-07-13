@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: lekklir-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+    pythonVersion: "3.11.9"
