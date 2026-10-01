@@ -2,6 +2,7 @@ import os
 import random
 import json
 import asyncio
+import time
 import threading
 from datetime import timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -49,6 +50,77 @@ SEND_ROLES = ["Главный Модератор", "Владелец Серве�
 УЛИЦЫ = ["ул. Ленина", "пр. Мира", "ул. Пушкина", "ул. Гагарина", "пр. Победы",
           "ул. Советская", "ул. Садовая", "пр. Независимости"]
 
+FIGHTERS_FILE = "fighters.json"
+PAYOUT_FILE = "payout.json"
+BOX_PRICE = 100
+PAYOUT_INTERVAL = 24 * 60 * 60  # доход раз в 24 часа
+
+# Доход бойца: от 0.5 до 15 ликкеров раз в 24 часа
+FIGHTERS = {
+    "Редкий": [
+        {"name": "Нищеброд Петя", "emoji": "🥉", "income": 0.5},
+        {"name": "Сонный Ваня", "emoji": "😴", "income": 0.5},
+        {"name": "Пиццаед 3000", "emoji": "🍕", "income": 0.5},
+        {"name": "Лягух из подвала", "emoji": "🐸", "income": 1},
+        {"name": "Камень с IQ 0", "emoji": "🗿", "income": 1},
+        {"name": "67", "emoji": "🎤", "income": 1},
+    ],
+    "Сверхредкий": [
+        {"name": "Клоун который всё проиграл", "emoji": "🤡", "income": 1.5},
+        {"name": "Парень который не проигрывает", "emoji": "😤", "income": 1.5},
+        {"name": "Утка которая думает что она человек", "emoji": "🦆", "income": 2},
+        {"name": "Кот который смотрит в стену", "emoji": "🐱", "income": 2},
+        {"name": "Дед который не понимает мемы", "emoji": "👴", "income": 2.5},
+        {"name": "Убежище", "emoji": "🏚️", "income": 3},
+    ],
+    "Эпический": [
+        {"name": "Тот кто поставил всё на рулетку", "emoji": "💀", "income": 4},
+        {"name": "Чел который выиграл один раз", "emoji": "🔥", "income": 4.5},
+        {"name": "Гений казино (банкрот)", "emoji": "🧠", "income": 5},
+        {"name": "Призрак чужих ликкеров", "emoji": "👻", "income": 5.5},
+        {"name": "Чекушка", "emoji": "🍶", "income": 6},
+    ],
+    "Мифический": [
+        {"name": "Сынок папы на максималках", "emoji": "👑", "income": 7},
+        {"name": "Ночной охотник за ликкерами", "emoji": "🌚", "income": 7.5},
+        {"name": "Тот кто не спит ради казика", "emoji": "⚡", "income": 8},
+        {"name": "Казик это моя жизнь", "emoji": "🎰", "income": 9},
+    ],
+    "Легендарный": [
+        {"name": "Топ 1 который реально топ 1", "emoji": "🏆", "income": 10},
+        {"name": "Продал почку выиграл две", "emoji": "💸", "income": 11},
+        {"name": "Мама я в топе", "emoji": "🌟", "income": 12},
+    ],
+    "Ультра легендарный": [
+        {"name": "Без комментариев", "emoji": "💎", "income": 13},
+        {"name": "Бог казика в человеческом теле", "emoji": "👾", "income": 14},
+    ],
+    "Секретный": [
+        {"name": "Тот самый", "emoji": "👁️", "income": 15},
+        {"name": "Ошибка системы", "emoji": "🌀", "income": 15},
+        {"name": "Бог Ликкеров", "emoji": "💰", "income": 15},
+    ],
+}
+
+# Шансы в процентах (сумма = 100). "Ничего" — макс. 35%, Секретный — 0.01%
+RARITY_CHANCES = [
+    ("Ничего", 35.0),
+    ("Редкий", 30.0),
+    ("Сверхредкий", 20.0),
+    ("Эпический", 10.0),
+    ("Мифический", 3.5),
+    ("Легендарный", 1.2),
+    ("Ультра легендарный", 0.29),
+    ("Секретный", 0.01),
+]
+
+RARITY_COLORS = {
+    "Редкий": "⬜", "Сверхредкий": "🟦", "Эпический": "🟪",
+    "Мифический": "🟥", "Легендарный": "🟨", "Ультра легендарный": "🟧", "Секретный": "⬛",
+}
+RARITY_ORDER = ["Редкий", "Сверхредкий", "Эпический", "Мифический",
+                "Легендарный", "Ультра легендарный", "Секретный"]
+
 
 # ===== ФАЙЛОВЫЕ ФУНКЦИИ =====
 def load_file(path):
@@ -65,10 +137,57 @@ def get_balance(user_id):
     data = load_file(BALANCE_FILE)
     return data.get(str(user_id), 0)
 
+def clean_num(x):
+    """Округляет до 0.1 и убирает .0 у целых чисел."""
+    x = round(x, 1)
+    return int(x) if x == int(x) else x
+
 def set_balance(user_id, amount):
     data = load_file(BALANCE_FILE)
-    data[str(user_id)] = max(0, amount)
+    data[str(user_id)] = clean_num(max(0, amount))
     save_file(BALANCE_FILE, data)
+
+def get_fighters_list(user_id):
+    return load_file(FIGHTERS_FILE).get(str(user_id), [])
+
+def add_fighters(user_id, new_fighters):
+    data = load_file(FIGHTERS_FILE)
+    data.setdefault(str(user_id), []).extend(new_fighters)
+    save_file(FIGHTERS_FILE, data)
+
+def get_daily_income(user_id):
+    return clean_num(sum(f["income"] for f in get_fighters_list(user_id)))
+
+def roll_fighter():
+    """Возвращает (редкость, боец) или ("Ничего", None)."""
+    r = random.uniform(0, sum(c for _, c in RARITY_CHANCES))
+    current = 0
+    for rarity, chance in RARITY_CHANCES:
+        current += chance
+        if r <= current:
+            if rarity == "Ничего":
+                return "Ничего", None
+            return rarity, random.choice(FIGHTERS[rarity])
+    return "Ничего", None
+
+async def income_loop():
+    """Раз в 24 часа начисляет доход от бойцов. Время последней выплаты хранится в файле."""
+    await client.wait_until_ready()
+    while True:
+        last = load_file(PAYOUT_FILE).get("last", 0)
+        now = time.time()
+        if now - last >= PAYOUT_INTERVAL:
+            fighters_data = load_file(FIGHTERS_FILE)
+            bal_data = load_file(BALANCE_FILE)
+            for uid, f_list in fighters_data.items():
+                income = sum(f["income"] for f in f_list)
+                if income > 0:
+                    bal_data[uid] = clean_num(bal_data.get(uid, 0) + income)
+            save_file(BALANCE_FILE, bal_data)
+            save_file(PAYOUT_FILE, {"last": now})
+            last = now
+        wait = PAYOUT_INTERVAL - (time.time() - last)
+        await asyncio.sleep(max(60, min(wait, 3600)))
 
 
 # ===== ВЕБ-СЕРВЕР ДЛЯ RENDER =====
@@ -86,10 +205,16 @@ def run_web():
     server.serve_forever()
 
 
+income_started = False
+
 @client.event
 async def on_ready():
+    global income_started
     await tree.sync()
     print(f"Бот запущен: {client.user}")
+    if not income_started:
+        income_started = True
+        client.loop.create_task(income_loop())
 
 
 # ===== КОМАНДЫ =====
@@ -104,7 +229,9 @@ async def баланс(interaction: discord.Interaction, участник: disco
         f"┌─────────────────────┐\n"
         f"        💰 **{цель.name}**\n"
         f"└─────────────────────┘\n"
-        f"💵 **{bal}** ликкеров")
+        f"💵 **{bal}** ликкеров\n"
+        f"📈 Доход: **{get_daily_income(цель.id)}**/сутки\n"
+        f"⚔️ Бойцов: **{len(get_fighters_list(цель.id))}**")
 
 @tree.command(name="магазин", description="Открыть магазин")
 async def магазин(interaction: discord.Interaction):
@@ -209,24 +336,24 @@ async def мн(interaction: discord.Interaction, ставка: int):
         return
     победа = random.choice([True, False])
     множитель = round(random.uniform(1.1, 1.9), 2)
+    # Ставка сразу списывается с баланса
+    остаток = bal - ставка
+    set_balance(interaction.user.id, остаток)
     if победа:
         выигрыш = int(ставка * множитель)
-        set_balance(interaction.user.id, bal + выигрыш)
-        new_bal = get_balance(interaction.user.id)
+        итог = остаток + выигрыш
+        set_balance(interaction.user.id, итог)
         await interaction.response.send_message(
-            f"🎲 **Множитель:** x{множитель}\n\n"
-            f"🎉 ВЫИГРЫШ!\n"
-            f"✅ **{ставка}** × {множитель} = **{выигрыш}** ликкеров!\n"
-            f"💰 Баланс: **{new_bal}**")
+            f"🎲 **Ставка:** {ставка} | **Осталось:** {остаток}\n\n"
+            f"🎉 ВЫИГРЫШ! **Множитель:** x{множитель}\n"
+            f"✅ {ставка} × {множитель} = **{выигрыш}**\n"
+            f"➕ {остаток} + {выигрыш} = **{итог}**\n"
+            f"💰 Баланс: **{get_balance(interaction.user.id)}**")
     else:
-        потеря = int(ставка * множитель)
-        set_balance(interaction.user.id, max(0, bal - потеря))
-        new_bal = get_balance(interaction.user.id)
         await interaction.response.send_message(
-            f"🎲 **Множитель:** x{множитель}\n\n"
-            f"💀 ПРОИГРЫШ!\n"
-            f"❌ **{ставка}** × {множитель} = **{потеря}** ликкеров потеряно!\n"
-            f"💰 Баланс: **{new_bal}**")
+            f"🎲 **Ставка:** {ставка} | **Осталось:** {остаток}\n\n"
+            f"💀 ПРОИГРЫШ! Ставка **{ставка}** потеряна.\n"
+            f"💰 Баланс: **{get_balance(interaction.user.id)}**")
 
 @tree.command(name="нак", description="Накрутить баланс участнику")
 @app_commands.describe(участник="Участник", сумма="Сумма")
@@ -353,6 +480,99 @@ async def отправить(interaction: discord.Interaction, участник:
         await interaction.followup.send("❌ Страна не найдена!", ephemeral=True)
         return
     await interaction.followup.send(f"✈️ {участник.mention} **отправлен в {страна}!**\n🧳 Счастливого пути!")
+
+
+@tree.command(name="боксы", description="Открыть боксы (1 бокс = 100 ликкеров)")
+@app_commands.describe(количество="Количество боксов (от 1 до 100)")
+async def боксы(interaction: discord.Interaction, количество: int):
+    await interaction.response.defer()
+    if количество <= 0 or количество > 100:
+        await interaction.followup.send("❌ От 1 до 100!", ephemeral=True)
+        return
+    price = количество * BOX_PRICE
+    bal = get_balance(interaction.user.id)
+    if bal < price:
+        await interaction.followup.send(f"❌ Нужно **{price}**, есть **{bal}**", ephemeral=True)
+        return
+    set_balance(interaction.user.id, bal - price)
+
+    выпало = {}   # (редкость, имя) -> [боец, количество]
+    ничего = 0
+    новые = []
+    for _ in range(количество):
+        rarity, fighter = roll_fighter()
+        if fighter is None:
+            ничего += 1
+            continue
+        новые.append({**fighter, "rarity": rarity})
+        key = (rarity, fighter["name"])
+        if key in выпало:
+            выпало[key][1] += 1
+        else:
+            выпало[key] = [fighter, 1]
+    if новые:
+        add_fighters(interaction.user.id, новые)
+
+    текст = f"📦 **{количество} боксов** за **{price}** ликкеров!\n\n"
+    for (rarity, _), (fighter, count) in sorted(
+            выпало.items(), key=lambda x: RARITY_ORDER.index(x[0][0]), reverse=True):
+        цвет = RARITY_COLORS.get(rarity, "⬜")
+        x = f" ×{count}" if count > 1 else ""
+        if rarity == "Секретный":
+            текст += f"{цвет} **[СЕКРЕТНЫЙ]** {fighter['emoji']} **{fighter['name']}**{x} +{fighter['income']}/сутки 🤫\n"
+        else:
+            текст += f"{цвет} **[{rarity}]** {fighter['emoji']} **{fighter['name']}**{x} +{fighter['income']}/сутки\n"
+    if ничего:
+        текст += f"📭 Пустых боксов: **{ничего}**\n"
+    текст += (f"\n📈 Доход: **{get_daily_income(interaction.user.id)}**/сутки\n"
+              f"💰 Остаток: **{get_balance(interaction.user.id)}**")
+    if len(текст) > 1900:
+        текст = текст[:1900] + "..."
+    await interaction.followup.send(текст)
+
+@tree.command(name="бойцы", description="Мои бойцы")
+async def бойцы(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    f_list = get_fighters_list(interaction.user.id)
+    if not f_list:
+        await interaction.followup.send("❌ Нет бойцов! Открой `/боксы`", ephemeral=True)
+        return
+    группы = {}
+    for f in f_list:
+        key = (f.get("rarity", "Редкий"), f["name"])
+        if key in группы:
+            группы[key][1] += 1
+        else:
+            группы[key] = [f, 1]
+    текст = f"⚔️ **Бойцы {interaction.user.name}** ({len(f_list)}):\n\n"
+    for (rarity, _), (f, count) in sorted(
+            группы.items(), key=lambda x: RARITY_ORDER.index(x[0][0]) if x[0][0] in RARITY_ORDER else 0,
+            reverse=True):
+        цвет = RARITY_COLORS.get(rarity, "⬜")
+        x = f" ×{count}" if count > 1 else ""
+        метка = "СЕКРЕТНЫЙ" if rarity == "Секретный" else rarity
+        текст += f"{цвет} **[{метка}]** {f['emoji']} **{f['name']}**{x} +{f['income']}/сутки\n"
+    текст += f"\n📈 Доход: **{get_daily_income(interaction.user.id)}**/сутки"
+    if len(текст) > 1900:
+        текст = текст[:1900] + "..."
+    await interaction.followup.send(текст, ephemeral=True)
+
+@tree.command(name="всебойцы", description="Все возможные бойцы")
+async def всебойцы(interaction: discord.Interaction):
+    await interaction.response.defer()
+    текст = "⚔️ **Все бойцы:**\n\n"
+    for rarity in RARITY_ORDER:
+        if rarity == "Секретный":
+            continue
+        цвет = RARITY_COLORS.get(rarity, "⬜")
+        текст += f"{цвет} **{rarity}:**\n"
+        for f in FIGHTERS[rarity]:
+            текст += f"  {f['emoji']} {f['name']} | +{f['income']}/сутки\n"
+        текст += "\n"
+    текст += "⬛ **Секретный:** ???"
+    if len(текст) > 1900:
+        текст = текст[:1900] + "..."
+    await interaction.followup.send(текст)
 
 
 # ===== ЗАПУСК БОТА =====
